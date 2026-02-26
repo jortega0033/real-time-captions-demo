@@ -24,7 +24,7 @@ const captureCamera = (callback) => {
 
 // Stops recording and ends real-time session. 
 const stopRecordingCallback = () => {
-  socket.send(JSON.stringify({terminate_session: true}));
+  socket.send(JSON.stringify({ type: 'Terminate' }));
   socket.close();
   socket = null;
 
@@ -50,26 +50,23 @@ startButton.onclick = async function () {
 
   const { token } = data;
 
-  // establish wss with AssemblyAI (AAI) at 16000 sample rate
-  socket = await new WebSocket(`wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&token=${token}`);
+  // establish wss with AssemblyAI (AAI) using v3 streaming endpoint
+  socket = await new WebSocket(
+    `wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&encoding=pcm_s16le&token=${token}`,
+  );
 
   // handle incoming messages to display captions on screen
-  const texts = {};
+  let latestTranscript = '';
   socket.onmessage = (message) => {
-    let msg = '';
     const res = JSON.parse(message.data);
-    texts[res.audio_start] = res.text;
-    const keys = Object.keys(texts);
-    keys.sort((a, b) => a - b);
-    for (const key of keys) {
-      if (texts[key]) {
-        if (msg.split(' ').length > 6) {
-          msg = ''
-        }  
-        msg += ` ${texts[key]}`;     
-      }
+    if (res.type === 'Turn') {
+      latestTranscript = (res.transcript || '').trim();
+      captions.innerText = latestTranscript;
+      return;
     }
-    captions.innerText = msg; 
+    if (res.type === 'Termination') {
+      captions.innerText = '';
+    }
   };
 
   socket.onerror = (event) => {
@@ -108,9 +105,14 @@ startButton.onclick = async function () {
               reader.onload = () => {
                 const base64data = reader.result;
 
-                // audio data must be sent as a base64 encoded string
+                // audio data must be sent as binary PCM bytes on v3
                 if (socket) {
-                  socket.send(JSON.stringify({ audio_data: base64data.split('base64,')[1] }));
+                  const binaryString = atob(base64data.split('base64,')[1]);
+                  const bytes = new Uint8Array(binaryString.length);
+                  for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                  }
+                  socket.send(bytes.buffer);
                 }
               };
               reader.readAsDataURL(blob);
