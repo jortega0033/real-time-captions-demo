@@ -9,6 +9,12 @@ let socket;
 let recorder;
 captions.style.display = 'none';
 
+const setIdleUiState = () => {
+  startButton.disabled = false;
+  startButton.innerText = 'Start Recording';
+  stopButton.disabled = true;
+};
+
 // Gets access to the webcam and microphone
 const captureCamera = (callback) => {
   navigator.mediaDevices.getUserMedia({ audio: true, video: { width: 1480, height: 720 } })
@@ -24,13 +30,48 @@ const captureCamera = (callback) => {
 
 // Stops recording and ends real-time session. 
 const stopRecordingCallback = () => {
-  socket.send(JSON.stringify({ type: 'Terminate' }));
-  socket.close();
-  socket = null;
+  if (socket) {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'Terminate' }));
+    }
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+      socket.close();
+    }
+    socket = null;
+  }
 
-  recorder.camera.stop();
-  recorder.destroy();
-  recorder = null;
+  if (recorder) {
+    if (recorder.camera) {
+      recorder.camera.stop();
+    }
+    recorder.destroy();
+    recorder = null;
+  }
+}
+
+const getTempToken = async (url) => {
+  let response = await fetch(url, { method: 'GET' });
+
+  if (response.status === 405) {
+    response = await fetch(url, { method: 'POST' });
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('Token endpoint did not return JSON. Confirm your backend is running on port 8000.');
+  }
+
+  if (!response.ok) {
+    throw new Error(data?.error || data?.message || `Token request failed (${response.status})`);
+  }
+
+  if (!data?.token) {
+    throw new Error('Token response missing token field.');
+  }
+
+  return data.token;
 }
 
 //Starts real-time session and trasncription
@@ -38,17 +79,17 @@ startButton.onclick = async function () {
   this.disabled = true;
   this.innerText = 'Camera Loading...'
 
-  const isLocal = window.location.hostname === 'localhost'
-  const url = isLocal ? 'http://localhost:8000/' : 'https://broken-smoke-9608.fly.dev/'
-  
-  const response = await fetch(url); // get temp session token from server.js (backend)
-  const data = await response.json();
+  const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname)
+  const url = isLocal ? 'http://localhost:8001/' : 'https://broken-smoke-9608.fly.dev/'
 
-  if(data.error){
-    alert(data.error)
+  let token;
+  try {
+    token = await getTempToken(url);
+  } catch (error) {
+    alert(error.message || 'Unable to start session.');
+    setIdleUiState();
+    return;
   }
-
-  const { token } = data;
 
   // establish wss with AssemblyAI (AAI) using v3 streaming endpoint
   socket = await new WebSocket(
@@ -77,6 +118,12 @@ startButton.onclick = async function () {
   socket.onclose = event => {
     console.log(event);
     captions.innerText = ''
+
+    if (event.code === 1008 && event.reason?.toLowerCase().includes('invalid api key')) {
+      alert('AssemblyAI rejected the connection: invalid API key. Check API_KEY in .env and restart `npm run start`.');
+      setIdleUiState();
+    }
+
     socket = null;
   }
 
@@ -130,6 +177,12 @@ startButton.onclick = async function () {
 
 stopButton.onclick = function() {
   this.disabled = true;
+  if (!recorder) {
+    stopRecordingCallback();
+    setIdleUiState();
+    return;
+  }
+
   recorder.stopRecording(stopRecordingCallback);
-  startButton.disabled = false;
+  setIdleUiState();
 };
